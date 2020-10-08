@@ -15,7 +15,8 @@ install_github("swager/balanceHD")
 
 ```{r}
 
-
+# Set seed for reproducibility
+set.seed(202010)
 library(ggplot2)   # plot
 library(glmnet)    # lasso
 library(grf)       # generalized random forests
@@ -23,6 +24,7 @@ library(sandwich)  # for robust CIs
 library(devtools)  # install from GitHub 
 library(balanceHD) # approximate residual balancing
 library(dplyr)
+
 ```
 
 
@@ -36,10 +38,101 @@ data<- read.csv('~/features_engeneering/ALL_STUDENTS.csv')
 #Only public school
 df<- data%>% filter(IN_TP_ESCOLA == 'Municipal+Estadual')
 
-#select features
-df<- df %>% dplyr::select (c(EDU_PAI, RENDA_PERCAPITA, QT_PESSOAS_CASA,EDU_MAE, NU_IDADE, TP_COR_RACA, TP_SEXO,
-                             IN_INFRA_NENHUMA,IN_INFRA_ELEMENTAR, IN_INFRA_BASICA, IN_INFRA_ADEQUADA, IN_INFRA_AVANCADA,
-                             TARGET))
+#Average performance
+df<- df%>%mutate(NOTA_MEDIA =rowMeans(cbind(NU_NOTA_CN, NU_NOTA_CH, NU_NOTA_LC, NU_NOTA_MT, NU_NOTA_REDACAO)))
+
+
+#Encoding categorical features
+df$SEXO_F<- if_else(df$TP_SEXO == 'Feminino', 1, 0)
+#df$SEXO_M<- if_else(df$TP_SEXO == 'Masculino', 1, 0)
+
+#df$RACA_NAO_DECLARADA<- if_else(df$TP_COR_RACA == 'Não declarada', 1, 0)
+df$RACA_BRANCA<- if_else(df$TP_COR_RACA == 'Branca', 1, 0)
+df$RACA_PARDA<- if_else(df$TP_COR_RACA == 'Parda', 1, 0)
+df$RACA_INDIGENA<- if_else(df$TP_COR_RACA == 'Indígena', 1, 0)
+df$RACA_PRETA<- if_else(df$TP_COR_RACA == 'Preta', 1, 0)
+df$RACA_AMARELA<- if_else(df$TP_COR_RACA == 'Amarela', 1, 0)
+
+df$EDU_PAI<- df$EDU_PAI%>%
+  recode(
+    '< 4ªSérie/Não sei'= 0,
+    '4ª Série' = 1,
+    '8ª Série' = 2,
+    'Ens. Médio' = 3,
+    'Faculdade' = 4,
+    'Pós-Gradução' = 5
+)
+
+
+
+```
+
+Build the final dataset
+
+```{r}
+#Set the threshold for treatment variable - Treatment is father who have graduate level or above
+df2<-df
+
+df2$EDU_PAI<- if_else(df2$EDU_PAI >3, 1, 0)
+
+#select final features set
+num_features_names<- c('QT_PESSOAS_CASA', 'NU_IDADE', 'RENDA_NUM')
+bin_features_names<- c('RACA_AMARELA','RACA_PRETA','RACA_NAO_DECLARADA','RACA_PARDA','RACA_INDIGENA',
+                      'SEXO_F', 'SEXO_M', 'IN_INFRA_NENHUMA','IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA')
+
+features<- c(num_features_names, bin_features_names)
+
+
+# Extracting and scaling numeric features
+scaled_num_features <- scale(df2[,num_features_names])
+
+# Extracting indicator variables
+bin_features <- df2[,bin_features_names]
+
+# Extracting outcome and treatment
+outcome <- df2$NOTA_MEDIA
+treatment <- df2$EDU_PAI
+filter<- df2$CO_ANO
+
+
+df2 <- data.frame(scaled_num_features, bin_features, W=treatment, Y=outcome, filter)
+
+head(df2)
+
+
+```
+
+A Logistic Regression - Base model
+
+
+
+```{r}
+
+#Binarize the outcome to be handle by Logistic Regression
+
+build_target <- function(dataset){
+  dataset<- dataset%>%mutate(
+    Y = ntile(Y, 4))
+  dataset$Y<- if_else(dataset$Y == 4, 1, 0)
+  return(dataset)
+}
+
+model<- function(dataset){
+  beta = c()
+  i=1
+  for (year in unique(dataset$filter)){
+   data<- dataset%>%filter(filter == year)
+   data<- build_target(data)
+   logistic <- glm(Y ~., data = data, family = "binomial")
+   beta[i]<- as.numeric(logistic$coefficients['W'])
+   i = i+1
+  }
+   return(beta)
+}
+
+betas<- model(df2)
+
+```
 
 
 
