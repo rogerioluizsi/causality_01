@@ -7,7 +7,7 @@ This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute
 
 Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
 ```{r}
-install.packages(c('ggplot2','glmnet', 'grf', 'sandwich', 'devtools'))
+install.packages(c('ggplot2','glmnet', 'grf', 'sandwich', 'devtools', 'dplyr'))
 library(devtools)
 install_github("swager/balanceHD")
 ```
@@ -22,6 +22,7 @@ library(grf)       # generalized random forests
 library(sandwich)  # for robust CIs
 library(devtools)  # install from GitHub 
 library(balanceHD) # approximate residual balancing
+library(dplyr)
 ```
 
 
@@ -29,6 +30,18 @@ library(balanceHD) # approximate residual balancing
 #load data
 data<- read.csv('~/features_engeneering/ALL_STUDENTS.csv')
 ```
+
+
+```{r}
+#Only public school
+df<- data%>% filter(IN_TP_ESCOLA == 'Municipal+Estadual')
+
+#select features
+df<- df %>% dplyr::select (c(EDU_PAI, RENDA_PERCAPITA, QT_PESSOAS_CASA,EDU_MAE, NU_IDADE, TP_COR_RACA, TP_SEXO,
+                             IN_INFRA_NENHUMA,IN_INFRA_ELEMENTAR, IN_INFRA_BASICA, IN_INFRA_ADEQUADA, IN_INFRA_AVANCADA,
+                             TARGET))
+
+
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
 
