@@ -31,28 +31,31 @@ library(dplyr)
 ```{r}
 #load data
 data<- read.csv('~/features_engeneering/ALL_STUDENTS.csv')
+#data<- read.csv('~/features_engeneering/ALL_SCHOOLS.csv')
+#data<- read.csv("enem18_causality_analysis")
 ```
 
 
-```{r}
-#Only public school
-df<- data%>% filter(IN_TP_ESCOLA == 'Municipal+Estadual')
 
-#Average performance
-df<- df%>%mutate(NOTA_MEDIA =rowMeans(cbind(NU_NOTA_CN, NU_NOTA_CH, NU_NOTA_LC, NU_NOTA_MT, NU_NOTA_REDACAO)))
+
+```{r}
+# #Only public school
+df<- data%>% filter(IN_TP_ESCOLA == 'Municipal+Estadual', CO_ANO==2018)
+# Percapita income
+df<- df%>%mutate(RENDA_PERCAPITA = if_else(QT_PESSOAS_CASA>0, RENDA_NUM/QT_PESSOAS_CASA, RENDA_NUM))
 
 
 #Encoding categorical features
 df$SEXO_F<- if_else(df$TP_SEXO == 'Feminino', 1, 0)
-#df$SEXO_M<- if_else(df$TP_SEXO == 'Masculino', 1, 0)
-
-#df$RACA_NAO_DECLARADA<- if_else(df$TP_COR_RACA == 'Não declarada', 1, 0)
+# #df$SEXO_M<- if_else(df$TP_SEXO == 'Masculino', 1, 0)
+# 
+df$RACA_NAO_DECLARADA<- if_else(df$TP_COR_RACA == 'Não declarada', 1, 0)
 df$RACA_BRANCA<- if_else(df$TP_COR_RACA == 'Branca', 1, 0)
 df$RACA_PARDA<- if_else(df$TP_COR_RACA == 'Parda', 1, 0)
 df$RACA_INDIGENA<- if_else(df$TP_COR_RACA == 'Indígena', 1, 0)
 df$RACA_PRETA<- if_else(df$TP_COR_RACA == 'Preta', 1, 0)
 df$RACA_AMARELA<- if_else(df$TP_COR_RACA == 'Amarela', 1, 0)
-
+# 
 df$EDU_PAI<- df$EDU_PAI%>%
   recode(
     '< 4ªSérie/Não sei'= 0,
@@ -61,84 +64,322 @@ df$EDU_PAI<- df$EDU_PAI%>%
     'Ens. Médio' = 3,
     'Faculdade' = 4,
     'Pós-Gradução' = 5
-)
-
-
-
+  )
 ```
+
+
 
 Build the final dataset
 
 ```{r}
 #Set the threshold for treatment variable - Treatment is father who have graduate level or above
-df2<-df
-
-df2$EDU_PAI<- if_else(df2$EDU_PAI >3, 1, 0)
+df$EDU_PAI<- if_else(df$EDU_PAI >3, 1, 0)
 
 #select final features set
-num_features_names<- c('QT_PESSOAS_CASA', 'NU_IDADE', 'RENDA_NUM')
-bin_features_names<- c('RACA_AMARELA','RACA_PRETA','RACA_NAO_DECLARADA','RACA_PARDA','RACA_INDIGENA',
-                      'SEXO_F', 'SEXO_M', 'IN_INFRA_NENHUMA','IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA')
+num_features_names<- c('RENDA_PERCAPITA', 'NU_IDADE')
+bin_features_names<- c('IN_INFRA_NENHUMA','IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA',
+                       'RACA_NAO_DECLARADA', 'RACA_BRANCA','RACA_PARDA', 'RACA_INDIGENA', 'RACA_PRETA', 'RACA_AMARELA',
+                       'SEXO_F')
+
 
 features<- c(num_features_names, bin_features_names)
 
 
 # Extracting and scaling numeric features
-scaled_num_features <- scale(df2[,num_features_names])
+scaled_num_features <- scale(df[,num_features_names])
 
 # Extracting indicator variables
-bin_features <- df2[,bin_features_names]
+bin_features <- df[,bin_features_names]
 
 # Extracting outcome and treatment
-outcome <- df2$NOTA_MEDIA
-treatment <- df2$EDU_PAI
-filter<- df2$CO_ANO
+outcome <- df$NU_NOTA_GERAL
+treatment <- df$EDU_PAI
 
 
-df2 <- data.frame(scaled_num_features, bin_features, W=treatment, Y=outcome, filter)
+df <- data.frame(scaled_num_features, bin_features, W=treatment, Y=outcome)
 
-head(df2)
+head(df)
 
 
 ```
+```{r}
+difference_in_means <- function(dataset) {
+  treated_idx <- which(dataset$W == 1)
+  control_idx <- which(dataset$W == 0)
+  
+  # Filter treatment / control observations, pulls outcome variable as a vector
+  y1 <- dataset[treated_idx, "Y"] # Outcome in treatment grp
+  y0 <- dataset[control_idx, "Y"] # Outcome in control group
+  
+  n1 <- sum(df[,"W"])     # Number of obs in treatment
+  n0 <- sum(1 - df[,"W"]) # Number of obs in control
+  
+  # Difference in means is ATE
+  tauhat <- mean(y1) - mean(y0)
+  
+  # 95% Confidence intervals
+  se_hat <- sqrt( var(y0)/(n0-1) + var(y1)/(n1-1) )
+  lower_ci <- tauhat - 1.96 * se_hat
+  upper_ci <- tauhat + 1.96 * se_hat
+  
+  return(c(ATE = tauhat, lower_ci = lower_ci, upper_ci = upper_ci))
+}
 
-A Logistic Regression - Base model
+tauhat_rct <- difference_in_means(df)
+```
 
+Difference in Means - Confounded effect
+```{r}
+print(tauhat_rct)
 
+```
+Computing Propensity Score 
 
 ```{r}
+Xmod = df[,!names(df) %in% c("Y", "W")]
+Ymod = df$Y
+Wmod = df$W
 
-#Binarize the outcome to be handle by Logistic Regression
+# Computing the propensity score by logistic regression of W on X.
+p_logistic.fit <- glm(Wmod ~ as.matrix(Xmod), family = "binomial")
+p_logistic <- predict(p_logistic.fit, type = "response")
+
+hist(p_logistic, main = "Histogram: Logistic Regression Propensity Scores"
+     , xlab = "Propensity Score", col = "cornflowerblue", las = 1)
+
+```
+```{r}
+plot(smooth.spline(x = p_logistic, y = Wmod, df = 4)
+     , xlab = "Propensity Score (Logistic Regression)", ylab = "Prob. Treated (W)"
+     , col = adjustcolor("black", alpha.f=0.4), pch=19, las = 1)
+abline(0, 1, lty="dashed")
+```
+```{r}
+dt <- data.frame(Wmod, p_logistic)
+dt1<-dt%>%filter(Wmod == 1)
+ggplot(dt1
+       ,aes(p_logistic, fill = Wmod, colour = Wmod)) +
+  geom_density(alpha = 0.7) +
+  xlim(0, 1)
+
+dt2<-dt%>%filter(Wmod == 0)
+ggplot(dt2
+       ,aes(p_logistic, fill = Wmod, colour = Wmod)) +
+  geom_density(alpha = 0.7) +
+  xlim(0, 1)
+
+```
+
+
+A Linear Regression - Conditional Average Treatment Effect
+
+```{r}
+ate_condmean_ols <- function(dataset) {
+  df_mod_centered = data.frame(scale(dataset, center = TRUE, scale = FALSE))
+  
+  # Running OLS with full interactions is like running OLS separately on
+  # the treated and controls. If the design matrix has been pre-centered,
+  # then the W-coefficient corresponds to the ATE.
+  lm.interact = lm(Y ~ . * W, data = df_mod_centered)
+  tau.hat = as.numeric(coef(lm.interact)["W"])
+  se.hat = as.numeric(sqrt(vcovHC(lm.interact)["W", "W"]))
+  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
+}
+
+tauhat_ols <- ate_condmean_ols(df)
+print(tauhat_ols)
+```
+
+
+logistic Regression 
+```{r}
+
+#Binarize the outcome to be handled by Logistic Regression
 
 build_target <- function(dataset){
   dataset<- dataset%>%mutate(
-    Y = ntile(Y, 4))
-  dataset$Y<- if_else(dataset$Y == 4, 1, 0)
+    Y_bin = ntile(Y, 4))
+  dataset$Y_bin<- if_else(dataset$Y_bin == 4, 1, 0)
   return(dataset)
 }
 
-model<- function(dataset){
-  beta = c()
-  i=1
-  for (year in unique(dataset$filter)){
-   data<- dataset%>%filter(filter == year)
-   data<- build_target(data)
-   logistic <- glm(Y ~., data = data, family = "binomial")
-   beta[i]<- as.numeric(logistic$coefficients['W'])
-   i = i+1
-  }
-   return(beta)
-}
+df_mod<-build_target(df)
 
-betas<- model(df2)
+df_mod<-df_mod%>%select(-Y)
+lr<- glm(Y_bin ~ ., family = binomial(logit), data=df_mod)
+
+tau.hat = as.numeric(coef(lr)["W"])
+summary(lr)
+
 
 ```
 
+Inverse-propensity score weighting - Here the propensity score serves a single-dimensional variable that summarizes how observables affect the treatment probability.
+```{r}
+ipw <- function(dataset, p) {
+  W <- dataset$W
+  Y <- dataset$Y
+  G <- ((W - p) * Y) / (p * (1 - p))
+  tau.hat <- mean(G)
+  se.hat <- sqrt(var(G) / (length(G) - 1))
+  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
+}
+
+tauhat_logistic_ipw <- ipw(df, p_logistic)
+print(tauhat_logistic_ipw)
+```
+```{r}
+ipw_bin <- function(dataset, p) {
+  W <- dataset$W
+  Y <- dataset$Y_bin
+  G <- ((W - p) * Y) / (p * (1 - p))
+  tau.hat <- mean(G)
+  se.hat <- sqrt(var(G) / (length(G) - 1))
+  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
+}
+
+tauhat_logistic_ipw <- ipw(df_mod, p_logistic)
+print(tauhat_logistic_ipw)
+```
+```
+
+
+Weighted OLS on W
+
+```{r}
+prop_score_ols <- function(dataset, p) {
+  # Pulling relevant columns
+  W <- dataset$W
+  Y <- dataset$Y
+  # Computing weights
+  weights <- (W / p) + ((1 - W) / (1 - p))
+  
+  # OLS
+  lm.fit <- lm(Y ~ W, data = dataset, weights = weights)
+  tau.hat = as.numeric(coef(lm.fit)["W"])
+  se.hat = as.numeric(sqrt(vcovHC(lm.fit)["W", "W"]))
+  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
+}
+
+tauhat_pscore_ols <- prop_score_ols(df, p_logistic)
+print(tauhat_pscore_ols)
+```
+Weighted LR on W
+```{r}
+prop_score_lr <- function(dataset, p) {
+  # Pulling relevant columns
+  W <- dataset$W
+  Y <- dataset$Y_bin
+  # Computing weights
+  weights <- (W / p) + ((1 - W) / (1 - p))
+  
+  # LR
+  lr.fit <- glm(Y ~ W,family = binomial(logit), data = dataset, weights = weights)
+  tau.hat = c(ATE =as.numeric(coef(lr)["W"]))
+  
+}
+
+tauhat_pscore_lr<- prop_score_lr(df_mod, p_logistic)
+print(tauhat_pscore_lr)
+```
+
+Doubly Robust methods
+
+combines both parts (regression and weighting) in an attempt to ameliorate the sensitivity to misspecification of models
+
+1 - First part modeled the conditional mean of outcomes given covariates and treatment
+2 - Second part rebalanced  the sample using propensity score 
+
+
+```{r}
+aipw_ols <- function(dataset, p) {
+  
+  ols.fit = lm(Y ~ W * ., data = dataset)
+  
+  dataset.treatall = dataset
+  dataset.treatall$W = 1
+  treated_pred = predict(ols.fit, dataset.treatall)
+  
+  dataset.treatnone = dataset
+  dataset.treatnone$W = 0
+  control_pred = predict(ols.fit, dataset.treatnone)
+  
+  actual_pred = predict(ols.fit, dataset)
+  
+  G <- treated_pred - control_pred +
+    ((dataset$W - p) * (dataset$Y - actual_pred)) / (p * (1 - p))
+  tau.hat <- mean(G)
+  se.hat <- sqrt(var(G) / (length(G) - 1))
+  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
+}
+
+tauhat_lin_logistic_aipw <- aipw_ols(df, p_logistic)
+print(tauhat_lin_logistic_aipw)
+```
 
 
 Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+```{r}
+aipw_lr <- function(dataset, p) {
+  
+  lr.fit = glm(Y_bin ~ W * ., data = dataset, family = binomial(logit))
+  
+  dataset.treatall = dataset
+  dataset.treatall$W = 1
+  treated_pred = predict(lr.fit, dataset.treatall)
+  
+  dataset.treatnone = dataset
+  dataset.treatnone$W = 0
+  control_pred = predict(lr.fit, dataset.treatnone)
+  
+  actual_pred = predict(lr.fit, dataset)
+  
+  G <- treated_pred - control_pred +
+    ((dataset$W - p) * (dataset$Y_bin - actual_pred)) / (p * (1 - p))
+  tau.hat <- c(ATE=mean(G))
+  
+}
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+tauhat_lin_logistic_aipw <- aipw_lr(df_mod, p_logistic)
+print(tauhat_lin_logistic_aipw)
+```
+Random Forest
+```{r}
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+Xmod = df[,!names(df) %in% c("Y", "W")]
+Ymod = df$Y
+Wmod = df$W
+cf = causal_forest(Xmod, Ymod, Wmod, num.trees = 500)
+
+```
+
+```{r}
+p_rf = cf$W.hat
+hist(p_rf)
+```
+
+```{r}
+plot(smooth.spline(p_rf, Wmod, df = 4))
+abline(0, 1)
+```
+```{r}
+plot(p_rf, p_logistic)
+abline(0, 1)
+```
+```{r}
+# compare the log likelihoods (bigger is better)
+loglik = c(LR=mean(Wmod * log(p_logistic) + (1 - Wmod) * log(1 - p_logistic)),
+           RF=mean(Wmod * log(p_rf) + (1 - Wmod) * log(1 - p_rf)))
+loglik
+```
+
+```{r}
+tauhat_ols_rf_aipw = ipw(df, p_rf)
+tauhat_ols_rf_aipw
+```
+
+```{r}
+tauhat_ols_rf_aipw = ipw_bin(df_mod, p_rf)
+tauhat_ols_rf_aipw
+```
 
