@@ -156,17 +156,15 @@ abline(0, 1, lty="dashed")
 ```
 ```{r}
 dt <- data.frame(Wmod, p_logistic)
-dt1<-dt%>%filter(Wmod == 1)
-ggplot(dt1
-       ,aes(p_logistic, fill = Wmod, colour = Wmod)) +
-  geom_density(alpha = 0.7) +
-  xlim(0, 1)
 
-dt2<-dt%>%filter(Wmod == 0)
-ggplot(dt2
-       ,aes(p_logistic, fill = Wmod, colour = Wmod)) +
+ggplot(dt
+       ,aes(p_logistic, fill = as.factor(Wmod), color = as.factor(Wmod))) +
   geom_density(alpha = 0.7) +
-  xlim(0, 1)
+  xlim(0, 1)+
+  geom_vline(aes(xintercept=mean(dt%>%filter(Wmod==0)%>%pull(p_logistic))),
+            color="orange", linetype="dashed", size=1)+
+  geom_vline(aes(xintercept=mean(dt%>%filter(Wmod==1)%>%pull(p_logistic))),
+            color="blue", linetype="dashed", size=1)
 
 ```
 
@@ -215,6 +213,7 @@ summary(lr)
 ```
 
 Inverse-propensity score weighting - Here the propensity score serves a single-dimensional variable that summarizes how observables affect the treatment probability.
+
 ```{r}
 ipw <- function(dataset, p) {
   W <- dataset$W
@@ -227,7 +226,11 @@ ipw <- function(dataset, p) {
 
 tauhat_logistic_ipw <- ipw(df, p_logistic)
 print(tauhat_logistic_ipw)
+
 ```
+Inverse-propensity score weighting in Binary outcome - Here the propensity score serves a single-dimensional variable that summarizes how observables affect the treatment probability.
+
+
 ```{r}
 ipw_bin <- function(dataset, p) {
   W <- dataset$W
@@ -240,7 +243,6 @@ ipw_bin <- function(dataset, p) {
 
 tauhat_logistic_ipw <- ipw(df_mod, p_logistic)
 print(tauhat_logistic_ipw)
-```
 ```
 
 
@@ -264,7 +266,9 @@ prop_score_ols <- function(dataset, p) {
 tauhat_pscore_ols <- prop_score_ols(df, p_logistic)
 print(tauhat_pscore_ols)
 ```
+
 Weighted LR on W
+
 ```{r}
 prop_score_lr <- function(dataset, p) {
   # Pulling relevant columns
@@ -282,6 +286,7 @@ prop_score_lr <- function(dataset, p) {
 tauhat_pscore_lr<- prop_score_lr(df_mod, p_logistic)
 print(tauhat_pscore_lr)
 ```
+
 
 Doubly Robust methods
 
@@ -343,6 +348,7 @@ aipw_lr <- function(dataset, p) {
 tauhat_lin_logistic_aipw <- aipw_lr(df_mod, p_logistic)
 print(tauhat_lin_logistic_aipw)
 ```
+
 Random Forest
 ```{r}
 
@@ -375,11 +381,31 @@ loglik
 
 ```{r}
 tauhat_ols_rf_aipw = ipw(df, p_rf)
+
 tauhat_ols_rf_aipw
 ```
+
+
 
 ```{r}
 tauhat_ols_rf_aipw = ipw_bin(df_mod, p_rf)
 tauhat_ols_rf_aipw
+```
+Propensity score matching - Using Logistic Regression
+
+Executing a matching algorithm
+
+```{r}
+#plot variables balance before matching
+library(ggplot2)
+theme_set(
+  theme_classic() + 
+    theme(legend.position = "top")
+  )
+
+#Age
+
+ggplot(df_bin, aes(x = RENDA_PERCAPITA, fill= as.factor(W))) + geom_boxplot()
+  
 ```
 
