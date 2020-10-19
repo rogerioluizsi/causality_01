@@ -7,7 +7,7 @@ This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute
 
 Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
 ```{r}
-install.packages(c('ggplot2','glmnet', 'grf', 'sandwich', 'devtools', 'dplyr'))
+install.packages(c('ggplot2','glmnet', 'grf', 'sandwich', 'devtools', 'dplyr', 'DescTools', 'caret'))
 library(devtools)
 install_github("swager/balanceHD")
 ```
@@ -24,69 +24,88 @@ library(sandwich)  # for robust CIs
 library(devtools)  # install from GitHub 
 library(balanceHD) # approximate residual balancing
 library(dplyr)
+library(ROCit)
+library(caret)
+library(DescTools)
 
 ```
 
 
 ```{r}
 #load data
-data<- read.csv('~/features_engeneering/ALL_STUDENTS.csv')
-#data<- read.csv('~/features_engeneering/ALL_SCHOOLS.csv')
-#data<- read.csv("enem18_causality_analysis")
+students<- read.csv('~/features_engeneering/ALL_STUDENTS_RAW.csv')
+#school<- read.csv('~/features_engeneering/ALL_SCHOOLS.csv')
+
 ```
 
-
+Choose the dataset, year and type of school
+```{r}
+# Filtering
+df<- students%>% filter(IN_TP_ESCOLA == 'Municipal+Estadual', CO_ANO==2018)
+```
 
 
 ```{r}
-# #Only public school
-df<- data%>% filter(IN_TP_ESCOLA == 'Municipal+Estadual', CO_ANO==2018)
-# Percapita income
-df<- df%>%mutate(RENDA_PERCAPITA = if_else(QT_PESSOAS_CASA>0, RENDA_NUM/QT_PESSOAS_CASA, RENDA_NUM))
 
+df$RACA_NAO_DECLARADA<- if_else(df$TP_COR_RACA ==0, 1, 0)
+df$RACA_BRANCA<- if_else(df$TP_COR_RACA ==1, 1, 0)
+df$RACA_PRETA<- if_else(df$TP_COR_RACA ==2, 1, 0)
+df$RACA_PARDA<- if_else(df$TP_COR_RACA ==3, 1, 0)
+df$RACA_AMARELA<- if_else(df$TP_COR_RACA ==4, 1, 0)
 
-#Encoding categorical features
-df$SEXO_F<- if_else(df$TP_SEXO == 'Feminino', 1, 0)
-# #df$SEXO_M<- if_else(df$TP_SEXO == 'Masculino', 1, 0)
-# 
-df$RACA_NAO_DECLARADA<- if_else(df$TP_COR_RACA == 'Não declarada', 1, 0)
-df$RACA_BRANCA<- if_else(df$TP_COR_RACA == 'Branca', 1, 0)
-df$RACA_PARDA<- if_else(df$TP_COR_RACA == 'Parda', 1, 0)
-df$RACA_INDIGENA<- if_else(df$TP_COR_RACA == 'Indígena', 1, 0)
-df$RACA_PRETA<- if_else(df$TP_COR_RACA == 'Preta', 1, 0)
-df$RACA_AMARELA<- if_else(df$TP_COR_RACA == 'Amarela', 1, 0)
-# 
-df$EDU_PAI<- df$EDU_PAI%>%
-  recode(
-    '< 4ªSérie/Não sei'= 0,
-    '4ª Série' = 1,
-    '8ª Série' = 2,
-    'Ens. Médio' = 3,
-    'Faculdade' = 4,
-    'Pós-Gradução' = 5
-  )
+#INDIANS ARE REPRESENTED WHEN ZERO IN ALL OTHER ONES
+
 ```
 
+Pre processing fuctions
 
+```{r}
+#Functions
+build_target <- function(dataset){
+  dataset<- dataset%>%mutate(
+    Y_bin = ntile(Y, 4))
+  dataset$Y_bin<- if_else(dataset$Y_bin == 4, 1, 0)
+  return(dataset%>%select(-Y))
+}
+
+clip_tail<- function(dataset) {
+  for (i in colnames(dataset)) {
+    #print(i)
+    if (is.numeric(dataset[[i]]) & (length(dataset[[i]]%>%unique()> 2))){
+      #print(i)
+      dataset[[i]]<- Winsorize( dataset[[i]],  probs = c(0.025, 0.975), na.rm = FALSE, type = 7)
+    }
+  }
+  return(dataset)
+}  
+
+drop_col_hight_mode<- function(dataset){
+  for (i in colnames(dataset)){
+    prop_mode<- sort(-table(dataset[[i]]))[1]/nrow(dataset)*(-1)# get mode value
+    if (prop_mode > 0.9){
+      dataset<- dataset%>%dplyr::select(-i)
+      print(i)
+    }
+  }
+  return(dataset)
+}
+
+
+```
 
 Build the final dataset
 
 ```{r}
+
 #Set the threshold for treatment variable - Treatment is father who have graduate level or above
 df$EDU_PAI<- if_else(df$EDU_PAI >3, 1, 0)
 
-#select final features set
-num_features_names<- c('RENDA_PERCAPITA', 'NU_IDADE')
-bin_features_names<- c('IN_INFRA_NENHUMA','IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA',
-                       'RACA_NAO_DECLARADA', 'RACA_BRANCA','RACA_PARDA', 'RACA_INDIGENA', 'RACA_PRETA', 'RACA_AMARELA',
-                       'SEXO_F')
 
 
-features<- c(num_features_names, bin_features_names)
-
-
-# Extracting and scaling numeric features
-scaled_num_features <- scale(df[,num_features_names])
+#selecting features set
+num_features_names<- c('RENDA_PERCAPITA', 'NU_IDADE', 'TITULACAO')
+bin_features_names<- c('IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA',
+                       'RACA_NAO_DECLARADA','RACA_BRANCA','RACA_PRETA','RACA_PARDA','RACA_AMARELA', 'TP_SEXO')
 
 # Extracting indicator variables
 bin_features <- df[,bin_features_names]
@@ -95,24 +114,39 @@ bin_features <- df[,bin_features_names]
 outcome <- df$NU_NOTA_GERAL
 treatment <- df$EDU_PAI
 
+#Trimming long tailed covariates
+clipped<- clip_tail(df[num_features_names])
 
-df <- data.frame(scaled_num_features, bin_features, W=treatment, Y=outcome)
+# Extracting and scaling numeric features
+#scaled_num_features <- scale(clipped[,])
+pp = preProcess(clipped, method = "range")
+scaled<- predict(pp, clipped)
 
-head(df)
+scaled_num_features <- data.matrix(scaled)
+
+#New dataset
+df_mod <- data.frame(scaled_num_features, bin_features, W=treatment, Y=outcome)
+
+#Build outcome (Target) covariate and take off covariates with hight mode occourrence
+df_mod<-build_target(df_mod)
+#drop_col_hight_mode(df_mod)
 
 
 ```
+
+Naive treatment (father education) effects
 ```{r}
 difference_in_means <- function(dataset) {
   treated_idx <- which(dataset$W == 1)
   control_idx <- which(dataset$W == 0)
   
   # Filter treatment / control observations, pulls outcome variable as a vector
-  y1 <- dataset[treated_idx, "Y"] # Outcome in treatment grp
-  y0 <- dataset[control_idx, "Y"] # Outcome in control group
+  y1 <- dataset[treated_idx, "Y_bin"] # Outcome in treatment grp
+  y0 <- dataset[control_idx, "Y_bin"] # Outcome in control group
   
-  n1 <- sum(df[,"W"])     # Number of obs in treatment
-  n0 <- sum(1 - df[,"W"]) # Number of obs in control
+  #print(treated_idx)
+  n1 <- sum(dataset[,"W"])     # Number of obs in treatment
+  n0 <- sum(1 - dataset[,"W"]) # Number of obs in control
   
   # Difference in means is ATE
   tauhat <- mean(y1) - mean(y0)
@@ -125,23 +159,48 @@ difference_in_means <- function(dataset) {
   return(c(ATE = tauhat, lower_ci = lower_ci, upper_ci = upper_ci))
 }
 
-tauhat_rct <- difference_in_means(df)
-```
-
-Difference in Means - Confounded effect
-```{r}
+tauhat_rct <- difference_in_means(df_mod)
 print(tauhat_rct)
-
 ```
+
+Logistic Regression Model with interactions at whole dataset
+
+```{r}
+
+p_logistic.fit <- glm(Y_bin ~ .+RENDA_PERCAPITA*W,
+                      family = binomial(logit), data= df_mod)
+p_logistic <- predict(p_logistic.fit, type = "response")
+
+p <- data.frame(df_mod$Y_bin, p_logistic)
+
+ggplot(p
+       ,aes(p_logistic,  fill = as.factor(df_mod.Y_bin))) +
+  geom_density(alpha = 0.7) 
+  
+
+## Warning: package 'ROCit' was built under R version 3.5.2
+
+ROCit_obj <- rocit(score=p_logistic,class=df_mod$Y_bin)
+plot(ROCit_obj)
+
+ksplot(ROCit_obj)
+
+summary(ROCit_obj)
+tauhat_lr = as.numeric(coef(p_logistic.fit)["W"])
+print(tauhat_lr)
+summary(p_logistic.fit)
+```
+
+
 Computing Propensity Score 
 
 ```{r}
-Xmod = df[,!names(df) %in% c("Y", "W")]
-Ymod = df$Y
-Wmod = df$W
+Xmod = df_mod[,!names(df_mod) %in% c("Y_bin", "W")]
+Ymod = df_mod$Y_bin
+Wmod = df_mod$W
 
 # Computing the propensity score by logistic regression of W on X.
-p_logistic.fit <- glm(Wmod ~ as.matrix(Xmod), family = "binomial")
+p_logistic.fit <- glm(Wmod ~ as.matrix(Xmod), family = binomial(logit))
 p_logistic <- predict(p_logistic.fit, type = "response")
 
 hist(p_logistic, main = "Histogram: Logistic Regression Propensity Scores"
@@ -158,81 +217,21 @@ abline(0, 1, lty="dashed")
 dt <- data.frame(Wmod, p_logistic)
 
 ggplot(dt
-       ,aes(p_logistic, fill = as.factor(Wmod), color = as.factor(Wmod))) +
+       ,aes(p_logistic,  fill = as.factor(Wmod))) +
   geom_density(alpha = 0.7) +
   xlim(0, 1)+
   geom_vline(aes(xintercept=mean(dt%>%filter(Wmod==0)%>%pull(p_logistic))),
-            color="orange", linetype="dashed", size=1)+
+            color="pink", linetype="dashed", size=1)+
   geom_vline(aes(xintercept=mean(dt%>%filter(Wmod==1)%>%pull(p_logistic))),
-            color="blue", linetype="dashed", size=1)
-
+            color="blue", linetype="dashed", size=1)+
+  scale_fill_discrete("Father Education")
 ```
 
 
-A Linear Regression - Conditional Average Treatment Effect
-
-```{r}
-ate_condmean_ols <- function(dataset) {
-  df_mod_centered = data.frame(scale(dataset, center = TRUE, scale = FALSE))
-  
-  # Running OLS with full interactions is like running OLS separately on
-  # the treated and controls. If the design matrix has been pre-centered,
-  # then the W-coefficient corresponds to the ATE.
-  lm.interact = lm(Y ~ . * W, data = df_mod_centered)
-  tau.hat = as.numeric(coef(lm.interact)["W"])
-  se.hat = as.numeric(sqrt(vcovHC(lm.interact)["W", "W"]))
-  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
-}
-
-tauhat_ols <- ate_condmean_ols(df)
-print(tauhat_ols)
-```
-
-
-logistic Regression 
-```{r}
-
-#Binarize the outcome to be handled by Logistic Regression
-
-build_target <- function(dataset){
-  dataset<- dataset%>%mutate(
-    Y_bin = ntile(Y, 4))
-  dataset$Y_bin<- if_else(dataset$Y_bin == 4, 1, 0)
-  return(dataset)
-}
-
-df_mod<-build_target(df)
-
-df_mod<-df_mod%>%select(-Y)
-lr<- glm(Y_bin ~ ., family = binomial(logit), data=df_mod)
-
-tau.hat = as.numeric(coef(lr)["W"])
-summary(lr)
-
-
-```
-
-Inverse-propensity score weighting - Here the propensity score serves a single-dimensional variable that summarizes how observables affect the treatment probability.
+Inverse-propensity score weighting - Here the propensity score serves a single-dimensional variable that summarizes how observable affect the treatment probability.
 
 ```{r}
 ipw <- function(dataset, p) {
-  W <- dataset$W
-  Y <- dataset$Y
-  G <- ((W - p) * Y) / (p * (1 - p))
-  tau.hat <- mean(G)
-  se.hat <- sqrt(var(G) / (length(G) - 1))
-  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
-}
-
-tauhat_logistic_ipw <- ipw(df, p_logistic)
-print(tauhat_logistic_ipw)
-
-```
-Inverse-propensity score weighting in Binary outcome - Here the propensity score serves a single-dimensional variable that summarizes how observables affect the treatment probability.
-
-
-```{r}
-ipw_bin <- function(dataset, p) {
   W <- dataset$W
   Y <- dataset$Y_bin
   G <- ((W - p) * Y) / (p * (1 - p))
@@ -243,28 +242,7 @@ ipw_bin <- function(dataset, p) {
 
 tauhat_logistic_ipw <- ipw(df_mod, p_logistic)
 print(tauhat_logistic_ipw)
-```
 
-
-Weighted OLS on W
-
-```{r}
-prop_score_ols <- function(dataset, p) {
-  # Pulling relevant columns
-  W <- dataset$W
-  Y <- dataset$Y
-  # Computing weights
-  weights <- (W / p) + ((1 - W) / (1 - p))
-  
-  # OLS
-  lm.fit <- lm(Y ~ W, data = dataset, weights = weights)
-  tau.hat = as.numeric(coef(lm.fit)["W"])
-  se.hat = as.numeric(sqrt(vcovHC(lm.fit)["W", "W"]))
-  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
-}
-
-tauhat_pscore_ols <- prop_score_ols(df, p_logistic)
-print(tauhat_pscore_ols)
 ```
 
 Weighted LR on W
@@ -279,7 +257,7 @@ prop_score_lr <- function(dataset, p) {
   
   # LR
   lr.fit <- glm(Y ~ W,family = binomial(logit), data = dataset, weights = weights)
-  tau.hat = c(ATE =as.numeric(coef(lr)["W"]))
+  tau.hat = c(ATE =as.numeric(coef(lr.fit)["W"]))
   
 }
 
@@ -296,34 +274,6 @@ combines both parts (regression and weighting) in an attempt to ameliorate the s
 2 - Second part rebalanced  the sample using propensity score 
 
 
-```{r}
-aipw_ols <- function(dataset, p) {
-  
-  ols.fit = lm(Y ~ W * ., data = dataset)
-  
-  dataset.treatall = dataset
-  dataset.treatall$W = 1
-  treated_pred = predict(ols.fit, dataset.treatall)
-  
-  dataset.treatnone = dataset
-  dataset.treatnone$W = 0
-  control_pred = predict(ols.fit, dataset.treatnone)
-  
-  actual_pred = predict(ols.fit, dataset)
-  
-  G <- treated_pred - control_pred +
-    ((dataset$W - p) * (dataset$Y - actual_pred)) / (p * (1 - p))
-  tau.hat <- mean(G)
-  se.hat <- sqrt(var(G) / (length(G) - 1))
-  c(ATE=tau.hat, lower_ci = tau.hat - 1.96 * se.hat, upper_ci = tau.hat + 1.96 * se.hat)
-}
-
-tauhat_lin_logistic_aipw <- aipw_ols(df, p_logistic)
-print(tauhat_lin_logistic_aipw)
-```
-
-
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
 ```{r}
 aipw_lr <- function(dataset, p) {
   
