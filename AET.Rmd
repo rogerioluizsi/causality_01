@@ -7,7 +7,7 @@ This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute
 
 Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
 ```{r}
-install.packages(c('ggplot2','glmnet', 'grf', 'sandwich', 'devtools', 'dplyr', 'DescTools', 'caret'))
+install.packages(c('ggplot2','glmnet', 'grf', 'sandwich', 'devtools', 'dplyr', 'DescTools', 'caret', 'MatchIt'))
 library(devtools)
 install_github("swager/balanceHD")
 ```
@@ -27,7 +27,7 @@ library(dplyr)
 library(ROCit)
 library(caret)
 library(DescTools)
-
+library(MatchIt)
 ```
 
 
@@ -302,15 +302,19 @@ print(tauhat_lin_logistic_aipw)
 Random Forest
 ```{r}
 
-Xmod = df[,!names(df) %in% c("Y", "W")]
-Ymod = df$Y
-Wmod = df$W
-cf = causal_forest(Xmod, Ymod, Wmod, num.trees = 500)
+Xmod = df_mod[,!names(df_mod) %in% c("Y_bin", "W")]
+Ymod = df_mod$Y_bin
+Wmod = df_mod$W
+
+cf = causal_forest(Xmod, Ymod, Wmod, num.trees = 100)
 
 ```
 
+
+Let's check if Causal Forest model build best probabilities
 ```{r}
 p_rf = cf$W.hat
+
 hist(p_rf)
 ```
 
@@ -318,6 +322,21 @@ hist(p_rf)
 plot(smooth.spline(p_rf, Wmod, df = 4))
 abline(0, 1)
 ```
+```{r}
+
+dt <- data.frame(Wmod, p_rf)
+ggplot(dt
+       ,aes(p_rf,  fill = as.factor(Wmod))) +
+  geom_density(alpha = 0.7) +
+  xlim(0, 1)+
+  geom_vline(aes(xintercept=mean(dt%>%filter(Wmod==0)%>%pull(p_logistic))),
+            color="pink", linetype="dashed", size=1)+
+  geom_vline(aes(xintercept=mean(dt%>%filter(Wmod==1)%>%pull(p_logistic))),
+            color="blue", linetype="dashed", size=1)+
+  scale_fill_discrete("Father Education")
+```
+
+
 ```{r}
 plot(p_rf, p_logistic)
 abline(0, 1)
@@ -330,32 +349,45 @@ loglik
 ```
 
 ```{r}
-tauhat_ols_rf_aipw = ipw(df, p_rf)
+tauhat_ols_rf_aipw = ipw(df_mod, p_rf)
 
 tauhat_ols_rf_aipw
 ```
-
-
 
 ```{r}
-tauhat_ols_rf_aipw = ipw_bin(df_mod, p_rf)
-tauhat_ols_rf_aipw
+tauhat_pscore_rf<- prop_score_lr(df_mod, p_rf)
+print(tauhat_pscore_rf)
 ```
+
+
+
 Propensity score matching - Using Logistic Regression
 
-Executing a matching algorithm
+Let’s calculate the mean for each covariate by the treatment status:
 
 ```{r}
-#plot variables balance before matching
-library(ggplot2)
-theme_set(
-  theme_classic() + 
-    theme(legend.position = "top")
-  )
+teste<- df_mod %>%
+  group_by(W) %>%
+  select(one_of(colnames(df_mod))) %>%
+  summarise_all(funs(mean(., na.rm = T)))
 
-#Age
+df2 <- data.frame(t(teste[-1]))
+colnames(df2) <- teste[, 1]
 
-ggplot(df_bin, aes(x = RENDA_PERCAPITA, fill= as.factor(W))) + geom_boxplot()
-  
+```
+
+Carrying out t-testes to evaluate whether these means are staticaly significant
+```{r}
+lapply(num_features_names, function(v) {
+    t.test(df_mod[, v] ~ df_mod[, 'W'])
+})
+
+lapply(bin_features_names, function(v) {
+    t.test(df_mod[, v] ~ df_mod[, 'W'])
+})
+```
+```{r}
+mod_match <- matchit(W ~ RENDA_PERCAPITA+NU_IDADE+TITULACAO+IN_INFRA_ELEMENTAR+IN_INFRA_BASICA+IN_INFRA_ADEQUADA+IN_INFRA_AVANCADA+RACA_NAO_DECLARADA+RACA_AMARELA+RACA_PARDA+RACA_BRANCA+RACA_PRETA+TP_SEXO,
+                     method = "nearest", data = df_mod)
 ```
 
