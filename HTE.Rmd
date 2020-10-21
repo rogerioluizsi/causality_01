@@ -1,0 +1,116 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(tidyverse)
+library(tidyselect)
+library(dplyr)       # Data manipulation (0.8.0.1)
+library(fBasics)     # Summary statistics (3042.89)
+library(corrplot)    # Correlations (0.84)
+library(psych)       # Correlation p-values (1.8.12)
+library(grf)         # Generalized random forests (0.10.2)
+library(rpart)       # Classification and regression trees, or CART (4.1-13)
+library(rpart.plot)  # Plotting trees (3.0.6)
+library(treeClust)   # Predicting leaf position for causal trees (1.1-7)
+library(car)         # linear hypothesis testing for causal tree (3.0-2)
+library(devtools)    # Install packages from github (2.0.1)
+library(readr)       # Reading csv files (1.3.1)
+library(tidyr)       # Database operations (0.8.3)
+library(tibble)      # Modern alternative to data frames (2.1.1)
+library(knitr)       # RMarkdown (1.21)
+library(kableExtra)  # Prettier RMarkdown (1.0.1)
+library(ggplot2)     # general plotting tool (3.1.0)
+library(haven)       # read stata files (2.0.0)
+library(aod)         # hypothesis testing (1.3.1)
+library(evtree)      # evolutionary learning of globally optimal trees (1.0-7)
+library(purrr)
+library(caret)
+```
+
+```{r}
+# install_github('susanathey/causalTree') # Uncomment this to install the causalTree package
+library(causalTree)
+
+```
+
+
+```{r}
+
+#selecting features set
+num_features_names<- c('RENDA_PERCAPITA', 'NU_IDADE', 'TITULACAO')
+bin_features_names<- c('IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA',
+                       'RACA_NAO_DECLARADA','RACA_BRANCA','RACA_PRETA','RACA_PARDA','RACA_AMARELA', 'TP_SEXO')
+
+# Extracting outcome and treatment
+outcome_names <- ('Y_bin')
+treatment_names <- ('W')
+
+covariates_names<- c(num_features_names, bin_features_names, outcome_names, treatment_names)
+```
+
+
+```{r}
+trainRowNumbers <- createDataPartition(df_mod$Y_bin, p=0.75, list=FALSE)
+     train <- df_mod[trainRowNumbers,]
+     test <- df_mod[-trainRowNumbers,]
+```
+
+```{r}
+
+train<-train %>% mutate(id = row_number()) 
+split_size <- floor(nrow(train) * 0.5)
+df_split <- sample_n(train, replace=FALSE, size=split_size)
+
+# Make the splits
+df_est <- anti_join(train,df_split, by= 'id')
+```
+
+
+```{r}
+# Make a data.frame containing summary statistics of interest
+summ_stats <- fBasics::basicStats(train)
+summ_stats <- as.data.frame(t(summ_stats))
+# Rename some of the columns for convenience
+summ_stats <- summ_stats %>% select("Mean", "Stdev", "Minimum", "1. Quartile", "Median",  "3. Quartile", "Maximum")
+summ_stats <- summ_stats %>% rename('Lower quartile'= '1. Quartile', 'Upper quartile' ='3. Quartile')
+```
+
+
+```{r}
+fmla_ct <- paste("factor(Y) ~", paste(covariates_names, collapse = " + "))
+
+print('This is our regression model')
+```
+```{r}
+ct_unpruned <- honest.causalTree(
+  formula = fmla_ct,            # Define the model
+  data = df_split,              # Subset used to create tree structure
+  est_data = df_est,            # Which data set to use to estimate effects
+
+  treatment = df_split$W,       # Splitting sample treatment variable
+  est_treatment = df_est$W,     # Estimation sample treatment variable
+
+  split.Rule = "CT",            # Define the splitting option
+  cv.option = "TOT",            # Cross validation options
+  cp = 0,                       # Complexity parameter
+
+  split.Honest = TRUE,          # Use honesty when splitting
+  cv.Honest = TRUE,             # Use honesty when performing cross-validation
+
+  minsize = 100,                 # Min. number of treatment and control cases in each leaf
+  HonestSampleSize = nrow(df_est)) # Num obs used in estimation after building the tree
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
