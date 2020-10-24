@@ -34,27 +34,96 @@ library(caret)
 ```
 
 ```{r}
-# install_github('susanathey/causalTree') # Uncomment this to install the causalTree package
+install_github('susanathey/causalTree') # Uncomment this to install the causalTree package
 library(causalTree)
 
 ```
+```{r}
+students<- read.csv('~/features_engeneering/ALL_STUDENTS_RAW.csv')
+# Filtering
+```
 
+```{r}
+df<- students %>% filter(IN_TP_ESCOLA == 'Municipal+Estadual', CO_ANO==2018)
+
+df$RACA_NAO_DECLARADA<- if_else(df$TP_COR_RACA ==0, 1, 0)
+df$RACA_BRANCA<- if_else(df$TP_COR_RACA ==1, 1, 0)
+df$RACA_PRETA<- if_else(df$TP_COR_RACA ==2, 1, 0)
+df$RACA_PARDA<- if_else(df$TP_COR_RACA ==3, 1, 0)
+df$RACA_AMARELA<- if_else(df$TP_COR_RACA ==4, 1, 0)
+
+#INDIANS ARE REPRESENTED WHEN ZERO IN ALL OTHER ONES
+
+```
+
+Pre processing fuctions
+
+```{r}
+#Functions
+build_target <- function(dataset){
+  dataset<- dataset%>%mutate(
+    Y_bin = ntile(Y, 4))
+  dataset$Y_bin<- if_else(dataset$Y_bin == 4, 1, 0)
+  return(dataset%>%select(-Y))
+}
+
+
+drop_col_hight_mode<- function(dataset){
+  for (i in colnames(dataset)){
+    prop_mode<- sort(-table(dataset[[i]]))[1]/nrow(dataset)*(-1)# get mode value
+    if (prop_mode > 0.9){
+      dataset<- dataset%>%dplyr::select(-i)
+      print(i)
+    }
+  }
+  return(dataset)
+}
+
+
+```
+
+Build the final dataset
 
 ```{r}
 
+#Set the threshold for treatment variable - Treatment is father who have graduate level or above
+df$EDU_PAI<- if_else(df$EDU_PAI >2, 1, 0)
+
+
+
 #selecting features set
-num_features_names<- c('RENDA_PERCAPITA', 'NU_IDADE', 'TITULACAO')
+num_features_names<- c('NU_IDADE', 'TITULACAO', 'RENDA_PERCAPITA')
 bin_features_names<- c('IN_INFRA_ELEMENTAR', 'IN_INFRA_BASICA', 'IN_INFRA_ADEQUADA', 'IN_INFRA_AVANCADA',
                        'RACA_NAO_DECLARADA','RACA_BRANCA','RACA_PRETA','RACA_PARDA','RACA_AMARELA', 'TP_SEXO')
+
+# Extracting indicator variables
+bin_features <- df[,bin_features_names]
+
+# Extracting outcome and treatment
+outcome <- df$NU_NOTA_GERAL
+treatment <- df$EDU_PAI
+
+num_features <- df[,num_features_names]
+#New dataset
+df_mod <- data.frame(num_features, bin_features, W=treatment, Y=outcome)
+
+#Build outcome (Target) covariate and take off covariates with hight mode occourrence
+df_mod<-build_target(df_mod)
+#drop_col_hight_mode(df_mod)
+```
+
+
+
+```{r}
 
 # Extracting outcome and treatment
 outcome_names <- ('Y_bin')
 treatment_names <- ('W')
 
-covariates_names<- c(num_features_names, bin_features_names, outcome_names, treatment_names)
+covariates_names<- c(num_features_names, bin_features_names)
 ```
 
-
+Using the matching dataframe of the AET file
 ```{r}
 trainRowNumbers <- createDataPartition(df_mod$Y_bin, p=0.75, list=FALSE)
      train <- df_mod[trainRowNumbers,]
@@ -82,35 +151,464 @@ summ_stats <- summ_stats %>% rename('Lower quartile'= '1. Quartile', 'Upper quar
 ```
 
 
+
 ```{r}
-fmla_ct <- paste("factor(Y) ~", paste(covariates_names, collapse = " + "))
+fmla_ct <- paste("factor(Y_bin) ~", paste(covariates_names, collapse = " + "))
 
 print('This is our regression model')
 ```
 ```{r}
 ct_unpruned <- honest.causalTree(
   formula = fmla_ct,            # Define the model
-  data = df_split,              # Subset used to create tree structure
+  data = train,              # Subset used to create tree structure
   est_data = df_est,            # Which data set to use to estimate effects
 
-  treatment = df_split$W,       # Splitting sample treatment variable
+  treatment = train$W,       # Splitting sample treatment variable
   est_treatment = df_est$W,     # Estimation sample treatment variable
 
   split.Rule = "CT",            # Define the splitting option
-  cv.option = "TOT",            # Cross validation options
+  cv.option = "matching",            # Cross validation options
   cp = 0,                       # Complexity parameter
 
   split.Honest = TRUE,          # Use honesty when splitting
   cv.Honest = TRUE,             # Use honesty when performing cross-validation
 
-  minsize = 100,                 # Min. number of treatment and control cases in each leaf
+  minsize = 10,                # Min. number of treatment and control cases in each leaf
   HonestSampleSize = nrow(df_est)) # Num obs used in estimation after building the tree
+```
+```{r}
+# Table of cross-validated values by tuning parameter.
+ct_cptable <- as.data.frame(ct_unpruned$cptable)
+
+# Obtain optimal complexity parameter to prune tree.
+selected_cp <- mean(ct_cptable$xerror)
+optim_cp_ct <- ct_cptable[selected_cp, "CP"]
+
+# Prune the tree at optimal complexity parameter.
+ct_pruned <- prune(tree = ct_unpruned, cp = selected_cp)
 ```
 
 
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+```{r}
+# Create a factor column 'leaf' indicating leaf assignment
+num_leaves <- length(unique(tauhat_ct_est))  #There are as many leaves as there are predictions
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+df_est$leaf <- factor(tauhat_ct_est, labels = seq(num_leaves))
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+# Run the regression
+ols_ct <- lm(as.formula("Y_bin ~ 0 + leaf + W:leaf"), data= df_est) #Warning: the tree won't split for charitable dataset
+print(as.formula("Y ~ 0 + leaf + W:leaf"))
+```
+```{r}
+#askNK:charitable does not split
+ols_ct_summary <- summary(ols_ct)
+te_summary <- coef(ols_ct_summary)[(num_leaves+1):(2*num_leaves), c("Estimate", "Std. Error")]
+```
+
+```{r}
+tauhat_ct_test <- predict(ct_pruned, newdata=test)
+```
+
+Assessing heterogeneity
+A natural place to begin is by ploting the (pruned) tree. We can use the rpart.plot function from the rpart.plot package.
+```{r}
+rpart.plot(
+  x = ct_pruned,        # Pruned tree
+  type = 3,             # Draw separate split labels for the left and right directions
+  fallen = TRUE,        # Position the leaf nodes at the bottom of the graph
+  leaf.round = 1,       # Rounding of the corners of the leaf node boxes
+  extra = 100,          # Display the percentage of observations in the node
+  branch = 0.1,          # Shape of the branch lines
+  box.palette = "RdBu") # Palette for coloring the node
+```
+```{r}
+hypothesis <- paste0("leaf1:W = leaf", seq(2, num_leaves), ":W")
+ftest <- linearHypothesis(ols_ct, hypothesis, test="F")
+```
+
+Next, we test if the average treatment effect is different between all two pairs of leaves. Note that here we are not performing any type of multiple hypothesis testing correction.
+
+```{r}
+# Null hypothesis: leaf i = leaf k for all i != k
+p_values_leaf_by_leaf <- matrix(nrow = num_leaves, ncol = num_leaves)
+differences_leaf_by_leaf <- matrix(nrow = num_leaves, ncol = num_leaves)
+stderror_leaf_by_leaf <- matrix(nrow = num_leaves, ncol = num_leaves)
+hypotheses_grid <- combn(1:num_leaves, 2)
+summ <- coef(summary(ols_ct))
+
+invisible(apply(hypotheses_grid, 2, function(x) {
+  leafi <- paste0("leaf", x[1], ":W")
+  leafj <- paste0("leaf", x[2], ":W")
+  hypothesis <- paste0(leafi, " = ", leafj)
+
+  differences_leaf_by_leaf[x[2], x[1]] <<- summ[leafj, 1] - summ[leafi, 1]
+  stderror_leaf_by_leaf[x[2], x[1]] <<- sqrt(summ[leafj, 2]^2 + summ[leafi, 2]^2)
+  p_values_leaf_by_leaf[x[2], x[1]] <<- linearHypothesis(ols_ct, hypothesis)[2, "Pr(>F)"]
+}))
+```
+
+
+```{r}
+# Null hypothesis: the mean is equal across all leaves
+hypothesis <- paste0("leaf1 = leaf", seq(2, num_leaves))
+means_per_leaf <- matrix(nrow = num_leaves, ncol = num_leaves)
+significance <- matrix(nrow = 2, ncol=length(covariates_names))
+
+# Regress each covariate on leaf assignment to means p
+cov_means <- lapply(covariates_names, function(covariate) {
+  lm(paste0(covariate, ' ~ 0 + leaf'), data = df_est)
+})
+
+# Extract the mean and standard deviation of each covariate per leaf
+cov_table <- lapply(cov_means, function(cov_mean) {
+  as.data.frame(t(coef(summary(cov_mean))[,c("Estimate", "Std. Error")]))
+})
+
+# Test if means are the same across leaves
+cov_ftests <- sapply(cov_means, function(cov_mean) {
+  # Sometimes the regression has no residual (SSE = 0), 
+  # so we cannot perform an F-test
+  tryCatch({
+    linearHypothesis(cov_mean, hypothesis)[2, c("F", "Pr(>F)")]
+  },
+    error = function(cond) {
+      message(paste0("Error message during F-test for`", cov_mean$terms[[2]], "`:"))
+      message(cond)
+      return(c("F" = NA, "Pr(>F)" = NA))
+    })
+})
+
+```
+
+```{r}
+covariate_means_per_leaf <- aggregate(. ~ leaf, df_est, mean)[,covariates_names]
+covariate_means <- apply(df_est, 2, mean)[covariates_names]
+leaf_weights <- table(df_train$leaf) / dim(df_train)[1] 
+deviations <- t(apply(covariate_means_per_leaf, 1, function(x) x - covariate_means))
+covariate_means_weighted_var <- apply(deviations, 2, function(x) sum(leaf_weights * x^2))
+covariate_var <- apply(df_est, 2, var)[covariates_names]
+cov_variation <- covariate_means_weighted_var / covariate_var
+```
+
+Causal Forest 
+```{r}
+cf <- causal_forest(
+  X = as.matrix(train[,covariates_names]),
+  Y = train$Y_bin,
+  W = train$W,
+  num.trees=100) # This is just for speed. In a real application, remember increase this number!
+                 # A good rule of thumb (for inference settings) is num.trees = number of individuals 
+                 # (nrow in our case, but would be different if using a panel dataset)
+
+```
+
+prediction out-of-bag
+```{r}
+#cf = causal_forest(Xmod, Ymod, Wmod, num.trees = 100)
+oob_pred <- predict(cf, estimate.variance=TRUE)
+
+```
+
+
+```{r}
+oob_tauhat_cf <- oob_pred$predictions
+oob_tauhat_cf_se <- sqrt(oob_pred$variance.estimates)
+```
+
+To predict on a test set, pass it using the newdata argument.
+```{r}
+test_pred <- predict(cf, newdata=as.matrix(test[covariates_names]), estimate.variance=TRUE)
+tauhat_cf_test <- test_pred$predictions
+tauhat_cf_test_se <- sqrt(test_pred$variance.estimates)
+```
+Assessing heterogeneity
+
+```{r}
+hist(oob_tauhat_cf, main="Causal forests: out-of-bag CATE")
+```
+
+It should not be interpreted as indicating that, for example, variable with low importance is not related to heterogeneity.
+```{r}
+var_imp <- c(variable_importance(cf))
+names(var_imp) <- covariatessor_names
+sorted_var_imp <- sort(var_imp, decreasing=TRUE)
+```
+
+
+Heterogeneity across subgroups
+```{r}
+num_tiles <- 4  # ntiles = CATE is above / below the median
+train$cate <- oob_tauhat_cf
+train$ntile <- factor(ntile(oob_tauhat_cf, n=num_tiles))
+```
+
+Sample Average Treatment Effect:
+```{r}
+ols_sample_ate <- lm("Y_bin ~ ntile + ntile:W", data=train)
+estimated_sample_ate <- coef(summary(ols_sample_ate))[(num_tiles+1):(2*num_tiles), c("Estimate", "Std. Error")]
+hypothesis_sample_ate <- paste0("ntile1:W = ", paste0("ntile", seq(2, num_tiles), ":W"))
+ftest_pvalue_sample_ate <- linearHypothesis(ols_sample_ate, hypothesis_sample_ate)[2,"Pr(>F)"]
+```
+
+
+```{r}
+estimated_aipw_ate <- lapply(
+  seq(num_tiles), function(w) {
+  ate <- average_treatment_effect(cf, subset = train$ntile == w)
+})
+estimated_aipw_ate <- data.frame(do.call(rbind, estimated_aipw_ate))
+
+# Testing for equality using Wald test
+waldtest_pvalue_aipw_ate <- wald.test(Sigma = diag(estimated_aipw_ate$std.err^2),
+                                      b = estimated_aipw_ate$estimate,
+                                      Terms = 1:num_tiles)$result$chi2[3]
+```
+
+
+```{r}
+# Round the estimates and standard errors before displaying them
+estimated_sample_ate_rounded <- round(signif(estimated_sample_ate, digits = 6), 6)
+estimated_aipw_ate_rounded <- round(signif(estimated_aipw_ate, digits = 6), 6)
+
+estimated_sample_ate <- as.data.frame(estimated_sample_ate)
+estimated_sample_ate$Method <- "Sample ATE"
+estimated_sample_ate$Ntile <- as.numeric(sub(".*([0-9]+).*", "\\1", rownames(estimated_sample_ate)))
+
+estimated_aipw_ate <- as.data.frame(estimated_aipw_ate)
+estimated_aipw_ate$Method <- "AIPW ATE"
+estimated_aipw_ate$Ntile <- as.numeric(rownames(estimated_aipw_ate))
+
+# unify column names and combine
+colnames(estimated_sample_ate) <- c("Estimate", "SE", "Method", "Ntile")
+colnames(estimated_aipw_ate) <- c("Estimate", "SE", "Method", "Ntile")
+combined_ate_estimates <- rbind(estimated_sample_ate, estimated_aipw_ate)
+
+# plot
+ggplot(combined_ate_estimates) +
+  geom_pointrange(aes(x = Ntile, y = Estimate, ymax = Estimate + 1.96 * SE, ymin = Estimate - 1.96 * SE, color = Method), 
+                  size = 0.5,
+                  position = position_dodge(width = .5)) +
+  geom_errorbar(aes(x = Ntile, ymax = Estimate + 1.96 * SE, ymin = Estimate - 1.96 * SE, color = Method), 
+                width = 0.4,
+                size = 0.75,
+                position = position_dodge(width = .5)) +
+  theme_minimal() +
+  labs(x = "N-tile", y = "ATE Estimate", title = "ATE within N-tiles (as defined by predicted CATE)")
+```
+Partial dependence plots
+
+It may also be interesting to examine how our CATE estimates behave when we change a single covariate, while keeping all the other covariates at a some fixed value. In the plot below we evaluate a variable of interest across quantiles, while keeping all other covariates at their median
+```{r}
+
+var_of_interest = "RENDA_PERCAPITA"
+#vars_of_interest = c("RENDA_PERCAPITA", "IN_INFRA_BASICA")
+
+```
+
+```{r}
+# Create a grid of values: if continuous, quantiles; else, plot the actual values
+is_continuous <- (length(unique(train[,var_of_interest])) > 5) # crude rule for determining continuity
+if(is_continuous) {
+  x_grid <- quantile(train[[var_of_interest]], probs = seq(0, 1, length.out = 5))
+} else {
+  x_grid <- sort(unique(train[[var_of_interest]]))
+}
+df_grid <- setNames(data.frame(x_grid), var_of_interest)
+
+# For the other variables, keep them at their median
+other_covariates <- covariates_names[!covariates_names %in% var_of_interest]
+df_median <- train %>% select(other_covariates) %>% summarise_all(median) 
+test <- crossing(df_median, df_grid)
+
+# Predict the treatment effect
+pred <- predict(cf, newdata=test[,covariates_names], estimate.variance=TRUE)
+test$tauhat <- pred$predictions
+test$se <- sqrt(pred$variance.estimates)
+```
+
+```{r}
+f_eval <- test %>% 
+            mutate(var_of_interest = as.factor(var_of_interest))
+
+# Descriptive labeling
+label_description <- ifelse(is_continuous, '\n(Evaluated at quintiles)', '')
+
+# Plot
+test %>%
+  mutate(ymin_val = tauhat-1.96*se) %>%
+  mutate(ymax_val = tauhat+1.96*se) %>%
+  ggplot() +
+    geom_line(aes_string(x=var_of_interest, y="tauhat", group = 1), color="red") +
+    geom_errorbar(aes_string(x=var_of_interest,ymin="ymin_val", ymax="ymax_val", width=.2),color="blue") +
+    xlab(paste0("Effect of ", var_of_interest, label_description)) +
+    ylab("Predicted Treatment Effect") +
+    theme_minimal() +
+    theme(axis.ticks = element_blank())
+```
+
+We can also check if different groups have different average covariate levels across n-tiles of estimated conditional treatment effects. The code here follows very closely what we did in the causal trees section. Recalling the warning against using variable importance measures, it is possible that one covariate is not “important” in splitting, but yet it varies strongly with treatment effects. The approach of comparing all covariates across n-tiles of treatment effects presents a fuller picture of how high-treatment-effect individuals differ fom low-treatment-effect individuals.
+
+```{r}
+cov_means <- lapply(covariates_names, function(covariate) {
+  lm(paste0(covariate, ' ~ 0 + ntile'), data = train)
+})
+
+# Extract the mean and standard deviation of each covariate per ntile
+cov_table <- lapply(cov_means, function(cov_mean) {
+  as.data.frame(t(coef(summary(cov_mean))[,c("Estimate", "Std. Error")]))
+})
+
+```
+
+An omnibus test for heterogeneity (BLP)
+
+The function test.calibration from the grf package evaluates the quality of causal forest estimates using a method that was motivated by Chernozhukov, Demirer, Duflo, and Fernandez-Val (2018). The idea is to estimate the best linear predictor of CATE using out-of-bag predictions . In the grf package, the exact implementation seeks to fit the following linear model.
+```{r}
+tc <- test_calibration(cf)
+caption <- "Best linear fit using forest predictions (on held-out data)
+                      as well as the mean forest prediction as regressors, along
+                      with heteroskedasticity-robust (HC3) SEs."
+table <- as.data.frame(tc[,]) 
+
+```
+
+X-learner
+```{r}
+X <- train[,covariates_names]
+W <- train$W
+Y <- train$Y
+num.trees <- 200  #  We'll make this a small number for speed here.
+```
+
+
+```{r}
+n_train <- dim(train)[1]
+
+# estimate separate response functions
+tf0 <- regression_forest(X[W==0,], Y[W==0], num.trees=num.trees)
+tf1 <- regression_forest(X[W==1,], Y[W==1], num.trees=num.trees)
+
+# Compute the 'imputed treatment effects' using the other group
+D1 <- Y[W==1] - predict(tf0, X[W==1,])$predictions
+D0 <- predict(tf1, X[W==0,])$predictions - Y[W==0]
+
+# Compute the cross estimators 
+xf0 <- regression_forest(X[W==0,], D0, num.trees=num.trees)
+xf1 <- regression_forest(X[W==1,], D1, num.trees=num.trees)
+
+# Predict treatment effects, making sure to always use OOB predictions where appropriate
+xf.preds.0 <- rep(0, n_train)
+xf.preds.0[W==0] <- predict(xf0)$predictions
+xf.preds.0[W==1] <- predict(xf0, X[W==1,])$predictions
+xf.preds.1 <- rep(0, n_train)
+xf.preds.1[W==0] <- predict(xf0)$predictions
+xf.preds.1[W==1] <- predict(xf0, X[W==1,])$predictions
+
+# Estimate the propensity score
+propf <- regression_forest(X, W, num.trees=num.trees)
+ehat <- predict(propf)$predictions
+
+# Finally, compute the X-learner prediction
+tauhat_xl <- (1 - ehat) * xf.preds.1 + ehat * xf.preds.0
+
+```
+
+
+```{r}
+X.test <- test[,covariates_names]
+ehat.test <- predict(propf, X.test)$predictions
+xf.preds.1.test <- predict(xf1, X.test)$predictions
+xf.preds.0.test <- predict(xf0, X.test)$predictions
+tauhat_xl_test <- (1 - ehat.test) * xf.preds.1.test + ehat.test * xf.preds.0.test
+
+```
+
+
+```{r}
+p <- mean(test$W)
+Y_star <- ((test$W - p)/(p*(1-p)))*test$Y
+
+# Compute the sample average treatment effect to use as a baseline comparison
+tauhat_sample_ate <- with(train, mean(Y[W==1]) - mean(Y[W==0]))
+
+# Compute test mse for all methods
+mse <- data.frame(
+  Sample_ATE_Loss = (Y_star - tauhat_sample_ate)^2,
+  Causal_Tree_Loss = (Y_star - tauhat_ct_test)^2,
+  Causal_Forest_Loss = (Y_star - tauhat_cf_test)^2,
+  X_Learner_Loss = (Y_star - tauhat_xl_test)^2)
+
+mse_summary <- describe(mse)[, c('mean', 'se')]
+```
+
+
+```{r}
+library(hrbrthemes)
+build_target_n <- function(dataset){
+  dataset<- dataset%>%mutate(
+    Y_bin = ntile(NU_NOTA_GERAL, 4))
+  dataset$Y_bin<- if_else(dataset$Y_bin == 4, 1, 0)
+  return(dataset)
+}
+
+
+uf = read.csv('uf_cod.csv')
+jt_2009<- students %>% filter(IN_TP_ESCOLA == 'Municipal+Estadual',  CO_ANO == 2009)
+jt_2018<- students %>% filter(IN_TP_ESCOLA == 'Municipal+Estadual',  CO_ANO == 2018)
+
+jt_2009<- build_target_n(jt_2009)
+jt_2018<- build_target_n(jt_2018)
+
+
+jt_2009<- jt_2009%>%
+  group_by(CO_UF)%>%
+  mutate(
+  N = n())%>%ungroup()%>%
+  group_by(CO_UF, Y_bin)%>%
+  mutate(
+  n_quartile = n(),
+  freq = n_quartile/ N)%>%
+  ungroup%>%
+  select(CO_UF, Y_bin, freq)%>%arrange(freq)%>%filter(Y_bin==1)%>%distinct()
+
+jt_2018<- jt_2018%>%
+  group_by(CO_UF)%>%
+  mutate(
+  N = n())%>%ungroup()%>%
+  group_by(CO_UF, Y_bin)%>%
+  mutate(
+  n_quartile = n(),
+  freq = n_quartile/ N)%>%
+  ungroup%>%
+  select(CO_UF, Y_bin, freq)%>%arrange(freq)%>%filter(Y_bin==1)%>%distinct()
+
+jt<-right_join(jt_2009, jt_2018, by='CO_UF')
+  
+jt<- inner_join(jt, uf, by='CO_UF')
+
+# Reorder data using average? Learn more about reordering in chart #267
+jt<-jt %>% 
+  rowwise() %>% 
+  mutate( mymean = mean(c(freq.x,freq.y) )) %>% 
+  arrange(mymean) %>% 
+  mutate(x=factor(uf, uf))
+ 
+# Plot
+ggplot(jt) +
+  geom_segment( aes(x=x, xend=x, y=freq.x, yend=freq.y), color="grey") +
+  geom_point( aes(x=x, y=freq.x), color=rgb(0.2,0.7,0.1,0.5), size=3 ) +
+  geom_point( aes(x=x, y=freq.y), color=rgb(0.7,0.2,0.1,0.5), size=3 ) +
+  coord_flip() +
+  xlab("") +
+  ylab("Frequency in upper quartile")
+  
+
+
+
+```
+
+```{r}
+jt%>%
+```
+
